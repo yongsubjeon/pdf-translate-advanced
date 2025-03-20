@@ -1,0 +1,433 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PDF 번역기</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js"></script>
+    <style>
+        body {
+            font-family: 'Arial', sans-serif;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        .container {
+            display: flex;
+            gap: 20px;
+        }
+        .pdf-preview, .translation {
+            flex: 1;
+            border: 1px solid #ccc;
+            padding: 20px;
+            border-radius: 5px;
+            min-height: 500px;
+            overflow: auto;
+        }
+        .pdf-preview h2, .translation h2 {
+            margin-top: 0;
+        }
+        #pdf-canvas {
+            border: 1px solid #ddd;
+            max-width: 100%;
+        }
+        #page-controls {
+            margin: 10px 0;
+        }
+        button {
+            padding: 5px 10px;
+            margin: 0 5px;
+        }
+        #upload-pdf {
+            margin-bottom: 20px;
+        }
+        #translation-content {
+            white-space: pre-wrap;
+            line-height: 1.6;
+            font-size: 14px;
+        }
+        .loading {
+            display: none;
+            margin-top: 10px;
+        }
+        /* 구조화된 요소 스타일 */
+        .tag-title {
+            font-size: 20px;
+            font-weight: bold;
+            margin-top: 15px;
+            margin-bottom: 10px;
+            color: #333;
+        }
+        .tag-subtitle {
+            font-size: 18px;
+            font-weight: bold;
+            margin-top: 12px;
+            margin-bottom: 8px;
+            color: #444;
+        }
+        .tag-image, .tag-chart {
+            border: 1px dashed #aaa;
+            padding: 10px;
+            margin: 10px 0;
+            background-color: #f9f9f9;
+            border-radius: 5px;
+            text-align: center;
+        }
+        .tag-table {
+            border: 1px solid #ccc;
+            margin: 10px 0;
+            padding: 5px;
+            background-color: #f5f5f5;
+            overflow-x: auto;
+        }
+        .tag-table table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        .tag-table th {
+            background-color: #f2f2f2;
+            font-weight: bold;
+            text-align: left;
+            padding: 8px;
+            border: 1px solid #ddd;
+        }
+        .tag-table td {
+            padding: 8px;
+            border: 1px solid #ddd;
+            text-align: left;
+        }
+        .tag-table tr:nth-child(even) {
+            background-color: #f9f9f9;
+        }
+        .tag-list {
+            margin-left: 20px;
+        }
+        .tag-footer {
+            font-style: italic;
+            color: #666;
+            margin-top: 15px;
+            border-top: 1px solid #eee;
+            padding-top: 5px;
+        }
+        .page-marker {
+            font-weight: bold;
+            margin: 20px 0 10px 0;
+            padding: 5px;
+            background-color: #eee;
+            border-radius: 3px;
+        }
+        /* 이미지와 차트 스타일 업데이트 */
+        .tag-image img, .tag-chart img {
+            max-width: 100%;
+            height: auto;
+            display: block;
+            margin: 10px auto;
+            border: 1px solid #ddd;
+        }
+        .tag-image .caption, .tag-chart .caption {
+            font-style: italic;
+            margin-top: 5px;
+            color: #666;
+        }
+        .missing-image {
+            background-color: #eee;
+            padding: 20px;
+            text-align: center;
+            font-style: italic;
+            color: #666;
+            margin: 10px 0;
+        }
+    </style>
+</head>
+<body>
+    <h1>PDF 번역기</h1>
+    <p>PDF 파일을 업로드하면 영어 내용을 한글로 번역해드립니다.</p>
+    
+    <input type="file" id="upload-pdf" accept="application/pdf" />
+    <div class="loading" id="loading">처리 중입니다...</div>
+    
+    <div class="container">
+        <div class="pdf-preview">
+            <h2>PDF 미리보기</h2>
+            <div id="page-controls">
+                <button id="prev-page">이전 페이지</button>
+                <span id="page-num">1</span> / <span id="page-count">-</span>
+                <button id="next-page">다음 페이지</button>
+            </div>
+            <canvas id="pdf-canvas"></canvas>
+        </div>
+        
+        <div class="translation">
+            <h2>번역 결과</h2>
+            <div id="translation-content"></div>
+        </div>
+    </div>
+
+    <script>
+        // PDF.js 설정
+        pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.worker.min.js';
+        
+        let pdfDoc = null;
+        let pageNum = 1;
+        let pdfData = null;
+        let pageImages = {}; // 페이지 이미지 캐시
+        
+        const canvas = document.getElementById('pdf-canvas');
+        const ctx = canvas.getContext('2d');
+        const pageNumSpan = document.getElementById('page-num');
+        const pageCountSpan = document.getElementById('page-count');
+        const prevPageBtn = document.getElementById('prev-page');
+        const nextPageBtn = document.getElementById('next-page');
+        const fileInput = document.getElementById('upload-pdf');
+        const translationContent = document.getElementById('translation-content');
+        const loading = document.getElementById('loading');
+
+        // PDF 페이지 렌더링 함수
+        async function renderPage(num) {
+            const page = await pdfDoc.getPage(num);
+            const viewport = page.getViewport({ scale: 1.5 });
+            canvas.height = viewport.height;
+            canvas.width = viewport.width;
+            
+            const renderContext = {
+                canvasContext: ctx,
+                viewport: viewport
+            };
+            
+            await page.render(renderContext).promise;
+            
+            // 페이지 이미지를 캐시에 저장 (이미지/표 추출용)
+            pageImages[num] = canvas.toDataURL('image/png');
+            
+            pageNumSpan.textContent = num;
+        }
+
+        // 좌표 문자열을 파싱하는 함수
+        function parseCoordinates(coordStr) {
+            if (!coordStr) return null;
+            
+            const matches = coordStr.match(/top-left:\((\d+),(\d+)\); bottom-right:\((\d+),(\d+)\)/);
+            if (!matches || matches.length < 5) return null;
+            
+            return {
+                topLeft: { x: parseInt(matches[1]) / 1000, y: parseInt(matches[2]) / 1000 },
+                bottomRight: { x: parseInt(matches[3]) / 1000, y: parseInt(matches[4]) / 1000 }
+            };
+        }
+
+        // 특정 좌표에서 이미지 조각 추출
+        async function extractImageFromPage(pageNumber, coordinates) {
+            if (!pdfDoc || !coordinates) return null;
+            
+            // 페이지 이미지가 캐시에 없으면 렌더링
+            if (!pageImages[pageNumber]) {
+                const page = await pdfDoc.getPage(pageNumber);
+                const viewport = page.getViewport({ scale: 1.5 });
+                const tempCanvas = document.createElement('canvas');
+                tempCanvas.width = viewport.width;
+                tempCanvas.height = viewport.height;
+                const tempCtx = tempCanvas.getContext('2d');
+                
+                await page.render({
+                    canvasContext: tempCtx,
+                    viewport: viewport
+                }).promise;
+                
+                pageImages[pageNumber] = tempCanvas.toDataURL('image/png');
+            }
+            
+            // 이미지 객체 생성
+            const img = new Image();
+            await new Promise(resolve => {
+                img.onload = resolve;
+                img.src = pageImages[pageNumber];
+            });
+            
+            // 임시 캔버스에 해당 부분 추출
+            const tempCanvas = document.createElement('canvas');
+            const tempCtx = tempCanvas.getContext('2d');
+            
+            // 원본 페이지 이미지 크기
+            const originalWidth = img.width;
+            const originalHeight = img.height;
+            
+            // 이미지 영역 계산
+            const x = coordinates.topLeft.x * originalWidth;
+            const y = coordinates.topLeft.y * originalHeight;
+            const width = (coordinates.bottomRight.x - coordinates.topLeft.x) * originalWidth;
+            const height = (coordinates.bottomRight.y - coordinates.topLeft.y) * originalHeight;
+            
+            // 캔버스 크기 설정 및 이미지 추출
+            tempCanvas.width = width;
+            tempCanvas.height = height;
+            tempCtx.drawImage(img, x, y, width, height, 0, 0, width, height);
+            
+            return tempCanvas.toDataURL('image/png');
+        }
+
+        // 구조화된 번역 결과 포맷팅
+        function formatTranslatedText(text) {
+            if (!text) return "";
+            
+            // 태그를 HTML로 변환하여 스타일 적용
+            let formattedText = text
+                // 페이지 마커
+                .replace(/\[페이지 (\d+)\/(\d+)\]/g, '<div class="page-marker">페이지 $1/$2</div>')
+                // 제목
+                .replace(/<제목>(.*?)<\/제목>/gs, '<div class="tag-title">$1</div>')
+                // 부제목
+                .replace(/<부제목>(.*?)<\/부제목>/gs, '<div class="tag-subtitle">$1</div>')
+                // 표
+                .replace(/<표 id='([^']*?)' page='([^']*?)' data-coord="([^"]*?)">(.*?)<\/표>/gs, 
+                        (match, id, page, coords, content) => {
+                            return `<div class="tag-table" data-id="${id}" data-page="${page}" data-coord="${coords}">${content}</div>`;
+                        })
+                // 이미지 (좌표 정보 이용)
+                .replace(/<이미지 id='([^']*?)' page='([^']*?)' data-coord="([^"]*?)">(.*?)<\/이미지>/gs, 
+                        (match, id, page, coords, content) => {
+                            const imgPlaceholder = `<div class="tag-image" data-id="${id}" data-page="${page}" data-coord="${coords}">
+                                <div class="missing-image">[이미지 로딩 중...]</div>
+                                <div class="caption">${content}</div>
+                            </div>`;
+                            return imgPlaceholder;
+                        })
+                // 차트 (좌표 정보 이용)
+                .replace(/<차트 id='([^']*?)' page='([^']*?)' data-coord="([^"]*?)">(.*?)<\/차트>/gs, 
+                        (match, id, page, coords, content) => {
+                            const chartPlaceholder = `<div class="tag-chart" data-id="${id}" data-page="${page}" data-coord="${coords}">
+                                <div class="missing-image">[차트 로딩 중...]</div>
+                                <div class="caption">${content}</div>
+                            </div>`;
+                            return chartPlaceholder;
+                        })
+                // 목록
+                .replace(/<목록>(.*?)<\/목록>/gs, '<div class="tag-list">$1</div>')
+                // 푸터
+                .replace(/<푸터>(.*?)<\/푸터>/gs, '<div class="tag-footer">$1</div>');
+            
+            return formattedText;
+        }
+
+        // 번역 결과에서 이미지와 차트에 실제 이미지 추가
+        async function populateImagesAndCharts() {
+            // 이미지 요소 처리
+            const imageElements = document.querySelectorAll('.tag-image[data-coord]');
+            for (const imgElem of imageElements) {
+                const pageNum = parseInt(imgElem.getAttribute('data-page') || '1');
+                const coordStr = imgElem.getAttribute('data-coord');
+                const coords = parseCoordinates(coordStr);
+                
+                if (coords) {
+                    try {
+                        const imageData = await extractImageFromPage(pageNum, coords);
+                        if (imageData) {
+                            const imgPlaceholder = imgElem.querySelector('.missing-image');
+                            if (imgPlaceholder) {
+                                // 이미지 추가
+                                const img = document.createElement('img');
+                                img.src = imageData;
+                                img.alt = imgElem.querySelector('.caption')?.textContent || '이미지';
+                                imgPlaceholder.replaceWith(img);
+                            }
+                        }
+                    } catch (error) {
+                        console.error('이미지 추출 오류:', error);
+                    }
+                }
+            }
+            
+            // 차트 요소 처리 (이미지와 동일한 방식으로)
+            const chartElements = document.querySelectorAll('.tag-chart[data-coord]');
+            for (const chartElem of chartElements) {
+                const pageNum = parseInt(chartElem.getAttribute('data-page') || '1');
+                const coordStr = chartElem.getAttribute('data-coord');
+                const coords = parseCoordinates(coordStr);
+                
+                if (coords) {
+                    try {
+                        const chartData = await extractImageFromPage(pageNum, coords);
+                        if (chartData) {
+                            const chartPlaceholder = chartElem.querySelector('.missing-image');
+                            if (chartPlaceholder) {
+                                // 차트 이미지 추가
+                                const img = document.createElement('img');
+                                img.src = chartData;
+                                img.alt = '차트';
+                                chartPlaceholder.replaceWith(img);
+                            }
+                        }
+                    } catch (error) {
+                        console.error('차트 추출 오류:', error);
+                    }
+                }
+            }
+        }
+
+        // 이전 페이지 버튼
+        prevPageBtn.addEventListener('click', () => {
+            if (pageNum <= 1) return;
+            pageNum--;
+            renderPage(pageNum);
+        });
+
+        // 다음 페이지 버튼
+        nextPageBtn.addEventListener('click', () => {
+            if (pageNum >= pdfDoc.numPages) return;
+            pageNum++;
+            renderPage(pageNum);
+        });
+
+        // PDF 파일 업로드 처리
+        fileInput.addEventListener('change', async event => {
+            const file = event.target.files[0];
+            if (!file || file.type !== 'application/pdf') return;
+            
+            // 초기화
+            pageImages = {};
+            
+            // PDF 미리보기 로드
+            const fileReader = new FileReader();
+            fileReader.onload = async function() {
+                pdfData = new Uint8Array(this.result);
+                
+                // PDF 로드 및 첫 페이지 렌더링
+                pdfDoc = await pdfjsLib.getDocument({ data: pdfData }).promise;
+                pageCountSpan.textContent = pdfDoc.numPages;
+                pageNum = 1;
+                await renderPage(pageNum);
+                
+                // PDF 내용 파싱 및 번역 요청
+                loading.style.display = 'block';
+                translationContent.textContent = '';
+                
+                const formData = new FormData();
+                formData.append('file', file);
+                
+                try {
+                    const response = await fetch('/translate-pdf', {
+                        method: 'POST',
+                        body: formData
+                    });
+                    
+                    if (!response.ok) {
+                        throw new Error('번역 중 오류가 발생했습니다.');
+                    }
+                    
+                    const data = await response.json();
+                    // 구조화된 형식으로 번역 결과 표시
+                    translationContent.innerHTML = formatTranslatedText(data.translation);
+                    
+                    // 이미지와 차트 추출 및 표시
+                    await populateImagesAndCharts();
+                } catch (error) {
+                    translationContent.textContent = `오류: ${error.message}`;
+                } finally {
+                    loading.style.display = 'none';
+                }
+            };
+            
+            fileReader.readAsArrayBuffer(file);
+        });
+    </script>
+</body>
+</html> 
