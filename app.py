@@ -17,7 +17,7 @@ from concurrent.futures import ThreadPoolExecutor
 # .env 파일에서 환경 변수 로드
 load_dotenv()
 
-app = Flask(__name__, static_folder='.')
+app = Flask(__name__, static_folder='static')
 app.config['UPLOAD_FOLDER'] = 'uploads'
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB 제한
 
