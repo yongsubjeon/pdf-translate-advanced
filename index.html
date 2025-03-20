@@ -23,6 +23,7 @@
             border-radius: 5px;
             min-height: 500px;
             overflow: auto;
+            position: relative;
         }
         .pdf-preview h2, .translation h2 {
             margin-top: 0;
@@ -49,6 +50,31 @@
         .loading {
             display: none;
             margin-top: 10px;
+            padding: 15px;
+            text-align: center;
+            background-color: rgba(255, 255, 255, 0.8);
+            border-radius: 5px;
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+            z-index: 10;
+        }
+        .loading::after {
+            content: "";
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            margin-left: 10px;
+            border: 2px solid #ccc;
+            border-radius: 50%;
+            border-top-color: #333;
+            animation: spin 1s linear infinite;
+            vertical-align: middle;
+        }
+        @keyframes spin {
+            to { transform: rotate(360deg); }
         }
         /* 구조화된 요소 스타일 */
         .tag-title {
@@ -137,6 +163,36 @@
             color: #666;
             margin: 10px 0;
         }
+        /* 텍스트 레이어 스타일 */
+        .textLayer {
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            overflow: hidden;
+            opacity: 0.2;
+            line-height: 1.0;
+        }
+        .textLayer > span {
+            color: transparent;
+            position: absolute;
+            white-space: pre;
+            cursor: text;
+            transform-origin: 0% 0%;
+        }
+        .textLayer .highlight {
+            margin: -1px;
+            padding: 1px;
+            background-color: rgba(180, 0, 170, 0.2);
+            border-radius: 4px;
+        }
+        .textLayer .highlight.selected {
+            background-color: rgba(0, 100, 0, 0.2);
+        }
+        .pdf-pages-container {
+            position: relative;
+        }
     </style>
 </head>
 <body>
@@ -154,7 +210,10 @@
                 <span id="page-num">1</span> / <span id="page-count">-</span>
                 <button id="next-page">다음 페이지</button>
             </div>
-            <canvas id="pdf-canvas"></canvas>
+            <div class="pdf-pages-container">
+                <canvas id="pdf-canvas"></canvas>
+                <div id="text-layer" class="textLayer"></div>
+            </div>
         </div>
         
         <div class="translation">
@@ -171,6 +230,7 @@
         let pageNum = 1;
         let pdfData = null;
         let pageImages = {}; // 페이지 이미지 캐시
+        let pageText = {}; // 페이지 텍스트 캐시
         
         const canvas = document.getElementById('pdf-canvas');
         const ctx = canvas.getContext('2d');
@@ -181,25 +241,75 @@
         const fileInput = document.getElementById('upload-pdf');
         const translationContent = document.getElementById('translation-content');
         const loading = document.getElementById('loading');
+        const textLayer = document.getElementById('text-layer');
 
         // PDF 페이지 렌더링 함수
         async function renderPage(num) {
+            // 텍스트 레이어 초기화
+            textLayer.innerHTML = '';
+            textLayer.style.width = canvas.width + 'px';
+            textLayer.style.height = canvas.height + 'px';
+            
             const page = await pdfDoc.getPage(num);
             const viewport = page.getViewport({ scale: 1.5 });
             canvas.height = viewport.height;
             canvas.width = viewport.width;
+            
+            // 텍스트 레이어 크기 조정
+            textLayer.style.width = canvas.width + 'px';
+            textLayer.style.height = canvas.height + 'px';
             
             const renderContext = {
                 canvasContext: ctx,
                 viewport: viewport
             };
             
+            // 페이지 렌더링
             await page.render(renderContext).promise;
             
             // 페이지 이미지를 캐시에 저장 (이미지/표 추출용)
             pageImages[num] = canvas.toDataURL('image/png');
             
+            // 텍스트 레이어 렌더링
+            const textContent = await page.getTextContent();
+            
+            // 텍스트 캐시 저장
+            pageText[num] = textContent;
+            
+            // 텍스트 레이어에 텍스트 렌더링
+            renderTextLayer(textContent, viewport);
+            
             pageNumSpan.textContent = num;
+        }
+        
+        // 텍스트 레이어 렌더링 함수
+        function renderTextLayer(textContent, viewport) {
+            // PDFJS TextLayerBuilder를 사용하지 않고 간단하게 구현
+            textContent.items.forEach(item => {
+                const tx = pdfjsLib.Util.transform(
+                    viewport.transform,
+                    item.transform
+                );
+                
+                const style = document.createElement('style');
+                const fontHeight = Math.sqrt((tx[2] * tx[2]) + (tx[3] * tx[3]));
+                const fontAscent = fontHeight;
+                
+                // 텍스트를 표시할 span 요소 생성
+                const textSpan = document.createElement('span');
+                textSpan.textContent = item.str;
+                textSpan.style.left = `${tx[4]}px`;
+                textSpan.style.top = `${tx[5] - fontAscent}px`;
+                textSpan.style.fontSize = `${fontHeight}px`;
+                textSpan.style.fontFamily = item.fontName || 'sans-serif';
+                textSpan.style.position = 'absolute';
+                textSpan.style.color = 'transparent';
+                textSpan.style.transform = `scaleX(${tx[0]})`;
+                
+                // 선택 가능한 텍스트로 설정
+                textSpan.dataset.text = item.str;
+                textLayer.appendChild(textSpan);
+            });
         }
 
         // 좌표 문자열을 파싱하는 함수
@@ -384,43 +494,51 @@
             
             // 초기화
             pageImages = {};
+            pageText = {};
+            
+            // 로딩 표시
+            loading.style.display = 'block';
             
             // PDF 미리보기 로드
             const fileReader = new FileReader();
             fileReader.onload = async function() {
                 pdfData = new Uint8Array(this.result);
                 
-                // PDF 로드 및 첫 페이지 렌더링
-                pdfDoc = await pdfjsLib.getDocument({ data: pdfData }).promise;
-                pageCountSpan.textContent = pdfDoc.numPages;
-                pageNum = 1;
-                await renderPage(pageNum);
-                
-                // PDF 내용 파싱 및 번역 요청
-                loading.style.display = 'block';
-                translationContent.textContent = '';
-                
-                const formData = new FormData();
-                formData.append('file', file);
-                
                 try {
-                    const response = await fetch('/translate-pdf', {
-                        method: 'POST',
-                        body: formData
-                    });
+                    // PDF 로드 및 첫 페이지 렌더링
+                    pdfDoc = await pdfjsLib.getDocument({ data: pdfData }).promise;
+                    pageCountSpan.textContent = pdfDoc.numPages;
+                    pageNum = 1;
+                    await renderPage(pageNum);
                     
-                    if (!response.ok) {
-                        throw new Error('번역 중 오류가 발생했습니다.');
+                    // PDF 내용 파싱 및 번역 요청
+                    translationContent.textContent = '';
+                    
+                    const formData = new FormData();
+                    formData.append('file', file);
+                    
+                    try {
+                        const response = await fetch('/translate-pdf', {
+                            method: 'POST',
+                            body: formData
+                        });
+                        
+                        if (!response.ok) {
+                            throw new Error('번역 중 오류가 발생했습니다.');
+                        }
+                        
+                        const data = await response.json();
+                        // 구조화된 형식으로 번역 결과 표시
+                        translationContent.innerHTML = formatTranslatedText(data.translation);
+                        
+                        // 이미지와 차트 추출 및 표시
+                        await populateImagesAndCharts();
+                    } catch (error) {
+                        translationContent.textContent = `오류: ${error.message}`;
                     }
-                    
-                    const data = await response.json();
-                    // 구조화된 형식으로 번역 결과 표시
-                    translationContent.innerHTML = formatTranslatedText(data.translation);
-                    
-                    // 이미지와 차트 추출 및 표시
-                    await populateImagesAndCharts();
-                } catch (error) {
-                    translationContent.textContent = `오류: ${error.message}`;
+                } catch (pdfError) {
+                    console.error('PDF 로드 오류:', pdfError);
+                    translationContent.textContent = `PDF 로드 오류: ${pdfError.message}`;
                 } finally {
                     loading.style.display = 'none';
                 }
