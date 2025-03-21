@@ -13,6 +13,7 @@ from dotenv import load_dotenv
 import PyPDF2
 import re
 from concurrent.futures import ThreadPoolExecutor
+from logging.handlers import RotatingFileHandler
 
 # .env 파일에서 환경 변수 로드
 load_dotenv()
@@ -25,8 +26,32 @@ app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB 제한
 if not os.path.exists(app.config['UPLOAD_FOLDER']):
     os.makedirs(app.config['UPLOAD_FOLDER'])
 
+# 로그 디렉토리 생성
+if not os.path.exists('logs'):
+    os.makedirs('logs')
+
 # 로깅 설정
-logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger('translate_app')
+logger.setLevel(logging.DEBUG)
+
+# 콘솔 핸들러 추가
+console_handler = logging.StreamHandler()
+console_handler.setLevel(logging.INFO)
+console_format = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+console_handler.setFormatter(console_format)
+
+# 파일 핸들러 추가 (10MB 크기 제한, 백업 5개)
+file_handler = RotatingFileHandler('logs/app.log', maxBytes=10*1024*1024, backupCount=5)
+file_handler.setLevel(logging.DEBUG)
+file_format = logging.Formatter('%(asctime)s - %(levelname)s - %(funcName)s:%(lineno)d - %(message)s')
+file_handler.setFormatter(file_format)
+
+# 핸들러 등록
+logger.addHandler(console_handler)
+logger.addHandler(file_handler)
+
+# 기본 로거 설정 방지 (이미 설정했으므로)
+logger.propagate = False
 
 # Upstage API 설정
 UPSTAGE_API_KEY = os.getenv('UPSTAGE_API_KEY', '')  # .env 파일에서 가져온 API 키
@@ -346,12 +371,16 @@ def clean_text(text):
     return text
 
 def split_text_into_chunks(text, max_length=3800):
-    """텍스트를 일정 길이 청크로 분할 (문단 단위 유지)"""
+    """텍스트를 번역을 위한 청크로 분할"""
+    # 청크 분할 시작 로그
+    logger.info(f"텍스트 청크 분할 시작: 총 길이 {len(text)} 문자")
+    
     chunks = []
     current_chunk = ""
     
     # 페이지 단위로 먼저 분할
     pages = re.split(r'(\n\[페이지 \d+/\d+\]\n)', text)
+    logger.info(f"페이지 기준 분할: {len(pages)} 섹션")
     
     i = 0
     while i < len(pages):
@@ -359,10 +388,12 @@ def split_text_into_chunks(text, max_length=3800):
         if i < len(pages) - 1 and re.match(r'\n\[페이지 \d+/\d+\]\n', pages[i]):
             header = pages[i]
             content = pages[i+1] if i+1 < len(pages) else ""
+            logger.debug(f"페이지 헤더 처리: {header.strip()}, 내용 길이: {len(content)} 문자")
             
             # 페이지 내용이 최대 길이보다 길면 단락 단위로 분할
             if len(content) > max_length:
                 paragraphs = re.split(r'(\n\n+)', content)
+                logger.debug(f"단락 분할: {len(paragraphs)} 단락")
                 temp_chunk = header
                 
                 for para in paragraphs:
@@ -371,12 +402,15 @@ def split_text_into_chunks(text, max_length=3800):
                     else:
                         if temp_chunk != header:  # 헤더만 있는 경우는 제외
                             chunks.append(temp_chunk)
+                            logger.debug(f"청크 추가: 길이 {len(temp_chunk)} 문자")
                         temp_chunk = header + para
                 
                 if temp_chunk != header:  # 마지막 청크 추가
                     chunks.append(temp_chunk)
+                    logger.debug(f"마지막 청크 추가: 길이 {len(temp_chunk)} 문자")
             else:
                 chunks.append(header + content)
+                logger.debug(f"페이지 전체를 하나의 청크로 추가: 길이 {len(header + content)} 문자")
             
             i += 2  # 헤더와 내용을 함께 처리했으므로 2 증가
         else:
@@ -387,10 +421,12 @@ def split_text_into_chunks(text, max_length=3800):
             else:
                 if current_chunk:
                     chunks.append(current_chunk)
+                    logger.debug(f"일반 청크 추가: 길이 {len(current_chunk)} 문자")
                 
                 if len(content) > max_length:
                     # 큰 청크는 단락 단위로 분할
                     paragraphs = re.split(r'(\n\n+)', content)
+                    logger.debug(f"큰 내용 단락 분할: {len(paragraphs)} 단락")
                     current_chunk = ""
                     
                     for para in paragraphs:
@@ -399,6 +435,7 @@ def split_text_into_chunks(text, max_length=3800):
                         else:
                             if current_chunk:
                                 chunks.append(current_chunk)
+                                logger.debug(f"분할된 청크 추가: 길이 {len(current_chunk)} 문자")
                             current_chunk = para
                 else:
                     current_chunk = content
@@ -408,32 +445,55 @@ def split_text_into_chunks(text, max_length=3800):
     # 마지막 청크 추가
     if current_chunk:
         chunks.append(current_chunk)
+        logger.debug(f"최종 청크 추가: 길이 {len(current_chunk)} 문자")
+    
+    logger.info(f"청크 분할 완료: 총 {len(chunks)} 청크")
+    # 각 청크 크기 확인 로그
+    for i, chunk in enumerate(chunks):
+        logger.debug(f"청크 #{i+1}: {len(chunk)} 문자")
     
     return chunks
 
 def translate_with_structure(text, document_structure=None):
     """텍스트를 구조 정보를 유지하며 번역"""
     try:
+        logger.info(f"번역 시작: 전체 텍스트 길이 {len(text)} 문자")
+        
         # 텍스트를 적절한 크기로 분할
         chunks = split_text_into_chunks(text)
         
         # 병렬 번역을 위한 ThreadPoolExecutor 사용
+        logger.info(f"병렬 번역 시작: {len(chunks)} 청크")
+        translated_chunks = []
+        
         with ThreadPoolExecutor(max_workers=3) as executor:
-            # 모든 청크를 병렬로 번역
-            translated_chunks = list(executor.map(translate_text, chunks))
+            # 모든 청크를 병렬로 번역 (개별 결과 추적)
+            future_to_chunk = {executor.submit(translate_text, chunk): i for i, chunk in enumerate(chunks)}
+            for future in future_to_chunk:
+                chunk_index = future_to_chunk[future]
+                try:
+                    result = future.result()
+                    translated_chunks.append(result)
+                    logger.info(f"청크 #{chunk_index+1} 번역 완료: 원본 {len(chunks[chunk_index])} → 번역 {len(result)} 문자")
+                except Exception as e:
+                    logger.error(f"청크 #{chunk_index+1} 번역 실패: {str(e)}")
+                    # 실패한 청크는 원본 텍스트로 대체
+                    translated_chunks.append(f"[번역 실패: {str(e)}]\n{chunks[chunk_index]}")
         
         # 번역된 청크 결합
         translated_text = "".join(translated_chunks)
+        logger.info(f"번역 완료: 최종 번역 길이 {len(translated_text)} 문자")
         
         # 구조 정보가 있는 경우 특수 처리 (표, 차트 등)
         if document_structure:
             # 표 형식 보존 처리 등 추가 작업 가능
-            pass
+            logger.debug("문서 구조 정보로 추가 처리 (사용되지 않음)")
         
         return translated_text
     except Exception as e:
-        logging.error(f"Error in translate_with_structure: {str(e)}")
+        logger.error(f"Error in translate_with_structure: {str(e)}")
         # 실패 시 일반 번역 시도
+        logger.info("전체 번역 실패, 일부 텍스트만 번역 시도")
         return translate_text(text[:4000]) + "\n\n(번역 중 오류가 발생하여 일부만 번역되었습니다.)"
 
 def get_embedding(text, model="embedding-query"):
@@ -467,7 +527,12 @@ def translate_text(text):
     try:
         # 빈 텍스트는 번역하지 않음
         if not text or len(text.strip()) == 0:
+            logger.debug("빈 텍스트 건너뜀")
             return ""
+        
+        # 토큰 수 추정 (영문 기준 약 4자에 1토큰)
+        estimated_tokens = len(text) // 4
+        logger.info(f"번역 요청: 텍스트 길이 {len(text)} 문자, 약 {estimated_tokens} 토큰 (추정)")
         
         headers = {
             "Content-Type": "application/json",
@@ -502,32 +567,53 @@ def translate_text(text):
             "max_tokens": 4096   # 충분한 출력 토큰 확보
         }
         
+        # 요청 시간 기록
+        start_time = time.time()
+        
         # 3번까지 재시도
         max_retries = 3
         retry_count = 0
         
         while retry_count < max_retries:
             try:
+                logger.debug(f"API 요청 시도 #{retry_count+1}")
                 response = requests.post(TRANSLATION_API_URL, json=payload, headers=headers)
+                
+                # 응답 시간 기록
+                response_time = time.time() - start_time
+                logger.info(f"API 응답 수신: 상태 코드 {response.status_code}, 응답 시간 {response_time:.2f}초")
                 
                 if response.status_code == 200:
                     data = response.json()
                     translated_text = data.get('choices', [{}])[0].get('message', {}).get('content', '')
+                    
+                    # 토큰 사용량 확인 (있을 경우)
+                    if 'usage' in data:
+                        prompt_tokens = data['usage'].get('prompt_tokens', 0)
+                        completion_tokens = data['usage'].get('completion_tokens', 0)
+                        total_tokens = data['usage'].get('total_tokens', 0)
+                        logger.info(f"토큰 사용량: 입력 {prompt_tokens}, 출력 {completion_tokens}, 총 {total_tokens}")
+                    
+                    logger.info(f"번역 완료: 결과 길이 {len(translated_text)} 문자")
                     return translated_text
                 elif response.status_code == 429:  # 속도 제한
                     retry_count += 1
-                    time.sleep(2 * retry_count)  # 지수 백오프
+                    wait_time = 2 * retry_count
+                    logger.warning(f"속도 제한 (429): {wait_time}초 대기 후 재시도 #{retry_count}")
+                    time.sleep(wait_time)  # 지수 백오프
                 else:
-                    logging.error(f"Translation API error: {response.status_code}, {response.text}")
-                    return f"번역 중 오류가 발생했습니다 (상태 코드: {response.status_code})"
+                    logger.error(f"Translation API error: 상태 코드 {response.status_code}, 응답 내용: {response.text}")
+                    return f"번역 중 오류가 발생했습니다 (상태 코드: {response.status_code})\n원인: {response.text}"
             except requests.exceptions.RequestException as e:
                 retry_count += 1
-                logging.error(f"Request failed (attempt {retry_count}): {str(e)}")
-                time.sleep(2 * retry_count)
+                wait_time = 2 * retry_count
+                logger.error(f"API 요청 실패 (시도 #{retry_count}): {str(e)}, {wait_time}초 대기")
+                time.sleep(wait_time)
         
+        logger.error(f"최대 재시도 횟수 ({max_retries}회) 초과: 번역 실패")
         return "번역 서버 연결 실패 (여러 번 재시도 후)"
     except Exception as e:
-        logging.error(f"Error translating text: {str(e)}")
+        logger.error(f"번역 처리 중 예외 발생: {str(e)}")
         return f"번역 중 오류가 발생했습니다: {str(e)}"
 
 if __name__ == '__main__':
