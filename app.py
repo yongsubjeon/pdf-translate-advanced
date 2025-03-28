@@ -209,6 +209,8 @@ def generate_structured_text_from_elements(elements, total_pages):
     if not elements:
         return ""
     
+    logger.info(f"OCR 요소를 구조화된 텍스트로 변환 시작: {len(elements)} 요소")
+    
     # 페이지별로 요소 그룹화
     page_elements = {}
     for elem in elements:
@@ -230,11 +232,43 @@ def generate_structured_text_from_elements(elements, total_pages):
             if e.get('coordinates') and len(e.get('coordinates', [])) > 0 else 0
         )
         
+        logger.debug(f"페이지 {page_num}: {len(sorted_elements)} 요소 처리")
+        
         # 각 요소를 처리
         for elem in sorted_elements:
             category = elem.get('category', '')
             elem_id = elem.get('id', '')
             content = ""
+            
+            # 좌표 정보 추출 (모든 요소에 공통 적용)
+            coords_attr = ""
+            bbox = None
+            
+            if 'coordinates' in elem and len(elem['coordinates']) >= 2:
+                try:
+                    # 좌표 정보가 polygon 형태인 경우 (여러 점)
+                    if len(elem['coordinates']) >= 2:
+                        # 모든 x, y 좌표 추출
+                        x_coords = [point['x'] for point in elem['coordinates']]
+                        y_coords = [point['y'] for point in elem['coordinates']]
+                        
+                        # 바운딩 박스 계산
+                        x0 = min(x_coords)
+                        y0 = min(y_coords)
+                        x1 = max(x_coords)
+                        y1 = max(y_coords)
+                        
+                        # 정밀도를 위해 소수점 4자리까지 유지하여 bbox 정보 저장
+                        bbox = [round(x0, 4), round(y0, 4), round(x1, 4), round(y1, 4)]
+                        
+                        # 데이터 속성으로 좌표 추가 (픽셀 단위로 1000배 확대)
+                        coords_attr = f"data-bbox=\"{bbox[0]},{bbox[1]},{bbox[2]},{bbox[3]}\" " + \
+                                     f"data-coord=\"x0:{int(bbox[0]*1000)},y0:{int(bbox[1]*1000)},x1:{int(bbox[2]*1000)},y1:{int(bbox[3]*1000)}\""
+                        
+                        logger.debug(f"요소 ID {elem_id}, 카테고리 {category}, 좌표: {bbox}")
+                except Exception as e:
+                    logger.warning(f"좌표 처리 중 오류: 요소 ID {elem_id}, 오류: {str(e)}")
+                    coords_attr = ""
             
             # 콘텐츠 추출
             if 'content' in elem:
@@ -249,37 +283,24 @@ def generate_structured_text_from_elements(elements, total_pages):
             
             # 요소 유형별 처리 (이미지/표 특별 처리)
             if category == 'heading1' or category.startswith('header'):
-                result_text += f"<제목>{content}</제목>\n\n"
+                result_text += f"<제목 id='{elem_id}' page='{page_num}' {coords_attr}>{content}</제목>\n\n"
             elif category == 'heading2':
-                result_text += f"<부제목>{content}</부제목>\n\n"
+                result_text += f"<부제목 id='{elem_id}' page='{page_num}' {coords_attr}>{content}</부제목>\n\n"
             elif category == 'paragraph':
-                result_text += f"{content}\n\n"
+                result_text += f"<문단 id='{elem_id}' page='{page_num}' {coords_attr}>{content}</문단>\n\n"
             elif category == 'list':
-                result_text += f"<목록>\n{content}\n</목록>\n\n"
+                result_text += f"<목록 id='{elem_id}' page='{page_num}' {coords_attr}>\n{content}\n</목록>\n\n"
             elif category == 'table':
                 # 테이블 처리 개선 - 테이블 내용과 페이지 번호 및 좌표 추가
                 table_content = ""
                 if 'table' in elem:
                     table_content = format_table(elem.get('table', []))
                 
-                # 좌표 정보 추가 (이미지 추출 용도)
-                coords = ""
-                if 'coordinates' in elem and len(elem['coordinates']) >= 2:
-                    top_left = elem['coordinates'][0]
-                    bottom_right = elem['coordinates'][2] if len(elem['coordinates']) > 2 else elem['coordinates'][1]
-                    coords = f"data-coord=\"top-left:({int(top_left['x']*1000)},{int(top_left['y']*1000)}); bottom-right:({int(bottom_right['x']*1000)},{int(bottom_right['y']*1000)})\""
-                
-                result_text += f"<표 id='{elem_id}' page='{page_num}' {coords}>\n{table_content}\n</표>\n\n"
+                result_text += f"<표 id='{elem_id}' page='{page_num}' {coords_attr}>\n{table_content}\n</표>\n\n"
             elif category == 'image' or category == 'figure':
                 # 이미지 정보 추가 (좌표 정보 포함)
                 image_desc = content or '이미지'
-                coords = ""
-                if 'coordinates' in elem and len(elem['coordinates']) >= 2:
-                    top_left = elem['coordinates'][0]
-                    bottom_right = elem['coordinates'][2] if len(elem['coordinates']) > 2 else elem['coordinates'][1]
-                    coords = f"data-coord=\"top-left:({int(top_left['x']*1000)},{int(top_left['y']*1000)}); bottom-right:({int(bottom_right['x']*1000)},{int(bottom_right['y']*1000)})\""
-                
-                result_text += f"<이미지 id='{elem_id}' page='{page_num}' {coords}>{image_desc}</이미지>\n\n"
+                result_text += f"<이미지 id='{elem_id}' page='{page_num}' {coords_attr}>{image_desc}</이미지>\n\n"
             elif category == 'chart':
                 # 차트 정보 추가 (좌표 정보 포함)
                 chart_desc = content or '차트'
@@ -287,19 +308,14 @@ def generate_structured_text_from_elements(elements, total_pages):
                 if 'table' in elem:
                     chart_data = format_table(elem.get('table', []))
                 
-                coords = ""
-                if 'coordinates' in elem and len(elem['coordinates']) >= 2:
-                    top_left = elem['coordinates'][0]
-                    bottom_right = elem['coordinates'][2] if len(elem['coordinates']) > 2 else elem['coordinates'][1]
-                    coords = f"data-coord=\"top-left:({int(top_left['x']*1000)},{int(top_left['y']*1000)}); bottom-right:({int(bottom_right['x']*1000)},{int(bottom_right['y']*1000)})\""
-                
-                result_text += f"<차트 id='{elem_id}' page='{page_num}' {coords}>{chart_desc}\n{chart_data}</차트>\n\n"
+                result_text += f"<차트 id='{elem_id}' page='{page_num}' {coords_attr}>{chart_desc}\n{chart_data}</차트>\n\n"
             elif category == 'footer':
-                result_text += f"<푸터>{content}</푸터>\n\n"
+                result_text += f"<푸터 id='{elem_id}' page='{page_num}' {coords_attr}>{content}</푸터>\n\n"
             else:
-                # 기타 요소
-                result_text += f"{content}\n\n"
+                # 기타 요소 - 범용 텍스트 블록으로 처리
+                result_text += f"<텍스트블록 id='{elem_id}' page='{page_num}' category='{category}' {coords_attr}>{content}</텍스트블록>\n\n"
     
+    logger.info(f"OCR 요소 구조화 완료: 변환된 텍스트 길이 {len(result_text)} 문자")
     return result_text
 
 def extract_document_structure(ocr_data):

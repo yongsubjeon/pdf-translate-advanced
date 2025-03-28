@@ -204,10 +204,10 @@
         /* 테스트 버튼 스타일 */
         #test-panel {
             margin-top: 20px;
-            padding: 10px;
-            border: 1px solid #ccc;
+            padding: 15px;
+            border: 1px solid #ddd;
             border-radius: 5px;
-            background-color: #f5f5f5;
+            background-color: #f8f9fa;
         }
         .test-button {
             padding: 8px 15px;
@@ -245,15 +245,13 @@
     <input type="file" id="upload-pdf" accept="application/pdf" />
     <div class="loading" id="loading">처리 중입니다...</div>
     
-    <!-- PDF-lib 테스트 패널 추가 -->
+    <!-- PDF-lib 테스트 패널 수정 -->
     <div id="test-panel" style="margin-top: 20px; padding: 15px; border: 1px solid #ddd; border-radius: 5px; background-color: #f8f9fa;">
-        <h3>PDF 생성 테스트</h3>
-        <div style="display: flex; gap: 10px; margin-bottom: 15px;">
-            <button id="test-simple-pdf" style="padding: 8px 15px; background-color: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer;">간단한 PDF 생성</button>
-            <button id="test-korean-pdf" style="padding: 8px 15px; background-color: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer;">한글 폰트 PDF 테스트</button>
-            <button id="test-pdf-with-layout" style="padding: 8px 15px; background-color: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer;">레이아웃 기반 PDF 생성</button>
+        <h3>PDF 번역 및 생성</h3>
+        <div>
+            <button id="create-translated-pdf" class="test-button">번역된 PDF 생성</button>
         </div>
-        <div id="test-status" style="display: none; padding: 10px; background-color: #e9ecef; border-radius: 4px;"></div>
+        <div id="test-status" class="success"></div>
     </div>
     
     <div class="container">
@@ -272,6 +270,11 @@
         
         <div class="translation">
             <h2>번역 결과</h2>
+            <div id="translation-page-controls">
+                <button id="translation-prev-page">이전 페이지</button>
+                <span id="translation-page-num">1</span> / <span id="translation-page-count">-</span>
+                <button id="translation-next-page">다음 페이지</button>
+            </div>
             <div id="translation-content"></div>
             <div class="translation-controls" style="margin-top: 20px;">
                 <button id="create-translated-pdf" style="padding: 10px 20px; background-color: #4CAF50; color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: bold; margin-right: 10px;">번역 PDF 생성</button>
@@ -290,6 +293,8 @@
         let pdfData = null;
         let pageImages = {}; // 페이지 이미지 캐시
         let pageText = {}; // 페이지 텍스트 캐시
+        let translationPages = []; // 번역된 페이지 내용 저장
+        let currentTranslationPage = 1; // 현재 번역 페이지 번호
         
         // DOM 요소 참조
         const canvas = document.getElementById('pdf-canvas');
@@ -302,6 +307,12 @@
         const translationContent = document.getElementById('translation-content');
         const loading = document.getElementById('loading');
         const textLayer = document.getElementById('text-layer');
+        
+        // 번역 페이지 네비게이션 요소
+        const translationPageNumSpan = document.getElementById('translation-page-num');
+        const translationPageCountSpan = document.getElementById('translation-page-count');
+        const translationPrevPageBtn = document.getElementById('translation-prev-page');
+        const translationNextPageBtn = document.getElementById('translation-next-page');
         
         // PDF 페이지 렌더링 함수
         async function renderPage(num) {
@@ -349,6 +360,9 @@
         function renderTextLayer(textContent, viewport) {
             if (!textContent || !textContent.items || textContent.items.length === 0) return;
             
+            // 텍스트 레이어 초기화
+            textLayer.innerHTML = '';
+            
             const items = textContent.items;
             const fragment = document.createDocumentFragment();
             
@@ -365,155 +379,36 @@
                 // 글꼴 크기 계산 (최소값 적용)
                 const fontSize = Math.max(minFontSize, Math.sqrt((tx[2] * tx[2]) + (tx[3] * tx[3])));
                 
-                // 위치 계산
-                const x = tx[4];
-                const y = tx[5];
-                
                 // 텍스트 요소 생성
                 const textElement = document.createElement('span');
                 textElement.textContent = item.str;
+                
+                // x, y 위치 계산 (단순화된 방식으로)
+                const x = tx[4];
+                const y = tx[5];
+                
                 textElement.style.left = `${x}px`;
                 textElement.style.top = `${y - fontSize}px`;
                 textElement.style.fontSize = `${fontSize}px`;
                 textElement.style.fontFamily = item.fontName || 'sans-serif';
-                textElement.style.transform = `scaleX(${tx[0]})`;
+                
+                // transform 속성 제거 - scaleX 문제 해결
+                // 특별한 변환이 필요한 경우가 아니면 transform은 사용하지 않음
                 
                 // 스타일 추가
                 textElement.style.color = 'black';
                 textElement.style.position = 'absolute';
+                textElement.style.whiteSpace = 'pre';
+                textElement.style.lineHeight = '1.0';
                 
+                // 텍스트 요소를 조각에 추가
                 fragment.appendChild(textElement);
             }
             
+            // 모든 텍스트 요소를 한 번에 DOM에 추가 (성능 향상)
             textLayer.appendChild(fragment);
         }
         
-        // PDF 파일 업로드 처리
-        fileInput.addEventListener('change', async event => {
-            const file = event.target.files[0];
-            if (!file || file.type !== 'application/pdf') return;
-            
-            // 초기화
-            pageImages = {};
-            pageText = {};
-            
-            // 로딩 표시
-            loading.style.display = 'block';
-            
-            // PDF 미리보기 로드
-            const fileReader = new FileReader();
-            fileReader.onload = async function() {
-                pdfData = new Uint8Array(this.result);
-                
-                try {
-                    // PDF 로드 및 첫 페이지 렌더링
-                    pdfDoc = await pdfjsLib.getDocument({
-                        data: pdfData,
-                        cMapUrl: 'https://unpkg.com/pdfjs-dist@3.11.174/cmaps/',
-                        cMapPacked: true,
-                        useSystemFonts: true,
-                        disableFontFace: false,
-                        standardFontDataUrl: 'https://unpkg.com/pdfjs-dist@3.11.174/standard_fonts/'
-                    }).promise;
-                    
-                    pageCountSpan.textContent = pdfDoc.numPages;
-                    pageNum = 1;
-                    
-                    // 첫 페이지 렌더링
-                    await renderPage(pageNum);
-                    
-                    // PDF 내용 파싱 및 번역 요청
-                    translationContent.textContent = '';
-                    
-                    const formData = new FormData();
-                    formData.append('file', file);
-                    
-                    try {
-                        const response = await fetch('/translate-pdf', {
-                            method: 'POST',
-                            body: formData
-                        });
-                        
-                        if (!response.ok) {
-                            throw new Error('번역 중 오류가 발생했습니다.');
-                        }
-                        
-                        const data = await response.json();
-                        // 구조화된 형식으로 번역 결과 표시
-                        translationContent.innerHTML = formatTranslatedText(data.translation);
-                        
-                        // 이미지와 차트 추출 및 표시
-                        await populateImagesAndCharts();
-                    } catch (error) {
-                        translationContent.textContent = `오류: ${error.message}`;
-                    }
-                } catch (pdfError) {
-                    console.error('PDF 로드 오류:', pdfError);
-                    translationContent.textContent = `PDF 로드 오류: ${pdfError.message}`;
-                } finally {
-                    loading.style.display = 'none';
-                }
-            };
-            fileReader.readAsArrayBuffer(file);
-        });
-        
-        // 이전 페이지 버튼
-        prevPageBtn.addEventListener('click', () => {
-            if (pageNum <= 1) return;
-            pageNum--;
-            renderPage(pageNum);
-        });
-
-        // 다음 페이지 버튼
-        nextPageBtn.addEventListener('click', () => {
-            if (pageNum >= pdfDoc.numPages) return;
-            pageNum++;
-            renderPage(pageNum);
-        });
-
-        // 구조화된 번역 결과 포맷팅
-        function formatTranslatedText(text) {
-            if (!text) return "";
-            
-            // 태그를 HTML로 변환하여 스타일 적용
-            let formattedText = text
-                // 페이지 마커
-                .replace(/\[페이지 (\d+)\/(\d+)\]/g, '<div class="page-marker">페이지 $1/$2</div>')
-                // 제목
-                .replace(/<제목>(.*?)<\/제목>/gs, '<div class="tag-title">$1</div>')
-                // 부제목
-                .replace(/<부제목>(.*?)<\/부제목>/gs, '<div class="tag-subtitle">$1</div>')
-                // 표
-                .replace(/<표 id='([^']*?)' page='([^']*?)' data-coord="([^"]*?)">(.*?)<\/표>/gs, 
-                        (match, id, page, coords, content) => {
-                            return `<div class="tag-table" data-id="${id}" data-page="${page}" data-coord="${coords}">${content}</div>`;
-                        })
-                // 이미지 (좌표 정보 이용)
-                .replace(/<이미지 id='([^']*?)' page='([^']*?)' data-coord="([^"]*?)">(.*?)<\/이미지>/gs, 
-                        (match, id, page, coords, content) => {
-                            const imgPlaceholder = `<div class="tag-image" data-id="${id}" data-page="${page}" data-coord="${coords}">
-                                <div class="missing-image">[이미지 로딩 중...]</div>
-                                <div class="caption">${content}</div>
-                            </div>`;
-                            return imgPlaceholder;
-                        })
-                // 차트 (좌표 정보 이용)
-                .replace(/<차트 id='([^']*?)' page='([^']*?)' data-coord="([^"]*?)">(.*?)<\/차트>/gs, 
-                        (match, id, page, coords, content) => {
-                            const chartPlaceholder = `<div class="tag-chart" data-id="${id}" data-page="${page}" data-coord="${coords}">
-                                <div class="missing-image">[차트 로딩 중...]</div>
-                                <div class="caption">${content}</div>
-                            </div>`;
-                            return chartPlaceholder;
-                        })
-                // 목록
-                .replace(/<목록>(.*?)<\/목록>/gs, '<div class="tag-list">$1</div>')
-                // 푸터
-                .replace(/<푸터>(.*?)<\/푸터>/gs, '<div class="tag-footer">$1</div>');
-            
-            return formattedText;
-        }
-
         // 좌표 문자열을 파싱하는 함수
         function parseCoordinates(coordStr) {
             if (!coordStr) return null;
@@ -632,126 +527,422 @@
             }
         }
 
+        // 번역 결과를 페이지별로 분할하는 함수
+        function splitTranslationIntoPages(translationHtml) {
+            // 페이지 마커를 기준으로 분할
+            const pageMarkerRegex = /<div class="page-marker">페이지 (\d+)\/(\d+)<\/div>/g;
+            
+            // 총 페이지 수 찾기
+            const matches = [...translationHtml.matchAll(pageMarkerRegex)];
+            let totalPages = 0;
+            
+            if (matches.length > 0) {
+                // 마지막 매치에서 총 페이지 수 추출
+                const lastMatch = matches[matches.length - 1];
+                totalPages = parseInt(lastMatch[2]);
+            } else {
+                // 페이지 마커가 없는 경우 전체를 1페이지로 처리
+                translationPages = [translationHtml];
+                return 1;
+            }
+            
+            // 분할 시작
+            const pages = [];
+            let currentIndex = 0;
+            
+            for (let i = 1; i <= totalPages; i++) {
+                const startMarker = `<div class="page-marker">페이지 ${i}/${totalPages}</div>`;
+                const startIndex = translationHtml.indexOf(startMarker, currentIndex);
+                
+                if (startIndex === -1) {
+                    // 페이지 마커가 없으면 건너뛰기
+                    continue;
+                }
+                
+                let endIndex;
+                if (i < totalPages) {
+                    // 다음 페이지 마커 찾기
+                    const nextMarker = `<div class="page-marker">페이지 ${i+1}/${totalPages}</div>`;
+                    endIndex = translationHtml.indexOf(nextMarker, startIndex);
+                } else {
+                    // 마지막 페이지는 끝까지
+                    endIndex = translationHtml.length;
+                }
+                
+                // 페이지 내용 추출
+                if (endIndex !== -1) {
+                    const pageContent = translationHtml.substring(startIndex, endIndex);
+                    pages.push(pageContent);
+                    currentIndex = endIndex;
+                } else {
+                    // 다음 마커를 찾지 못한 경우, 현재 위치부터 끝까지
+                    const pageContent = translationHtml.substring(startIndex);
+                    pages.push(pageContent);
+                    break;
+                }
+            }
+            
+            // 빈 페이지 배열 처리
+            if (pages.length === 0 && translationHtml.trim() !== '') {
+                // 페이지 마커가 없지만 내용이 있는 경우 전체를 한 페이지로
+                pages.push(translationHtml);
+            }
+            
+            translationPages = pages;
+            return pages.length;
+        }
+        
+        // 번역 페이지 렌더링 함수
+        function renderTranslationPage(pageNum) {
+            if (translationPages.length === 0) return;
+            
+            // 페이지 번호 유효성 검사
+            if (pageNum < 1) pageNum = 1;
+            if (pageNum > translationPages.length) pageNum = translationPages.length;
+            
+            // 현재 페이지 번호 업데이트
+            currentTranslationPage = pageNum;
+            translationPageNumSpan.textContent = pageNum;
+            
+            // 페이지 내용 표시
+            translationContent.innerHTML = translationPages[pageNum - 1];
+            
+            // 페이지별 이미지와 차트 로드
+            populateImagesAndCharts();
+        }
+
+        // PDF 파일 업로드 처리
+        fileInput.addEventListener('change', async event => {
+            const file = event.target.files[0];
+            if (!file || file.type !== 'application/pdf') return;
+            
+            // 초기화
+            pageImages = {};
+            pageText = {};
+            translationPages = [];
+            currentTranslationPage = 1;
+            
+            // 로딩 표시
+            loading.style.display = 'block';
+            
+            // PDF 미리보기 로드
+            const fileReader = new FileReader();
+            fileReader.onload = async function() {
+                pdfData = new Uint8Array(this.result);
+                
+                try {
+                    // PDF 로드 및 첫 페이지 렌더링
+                    pdfDoc = await pdfjsLib.getDocument({
+                        data: pdfData,
+                        cMapUrl: 'https://unpkg.com/pdfjs-dist@3.11.174/cmaps/',
+                        cMapPacked: true,
+                        useSystemFonts: true,
+                        disableFontFace: false,
+                        standardFontDataUrl: 'https://unpkg.com/pdfjs-dist@3.11.174/standard_fonts/'
+                    }).promise;
+                    
+                    pageCountSpan.textContent = pdfDoc.numPages;
+                    pageNum = 1;
+                    
+                    // 첫 페이지 렌더링
+                    await renderPage(pageNum);
+                    
+                    // PDF 내용 파싱 및 번역 요청
+                    translationContent.textContent = '';
+                    
+                    const formData = new FormData();
+                    formData.append('file', file);
+                    
+                    try {
+                        const response = await fetch('/translate-pdf', {
+                            method: 'POST',
+                            body: formData
+                        });
+                        
+                        if (!response.ok) {
+                            throw new Error('번역 중 오류가 발생했습니다.');
+                        }
+                        
+                        const data = await response.json();
+                        
+                        // 구조화된 형식으로 번역 결과 표시하고 페이지별로 분할
+                        const formattedText = formatTranslatedText(data.translation);
+                        const totalPages = splitTranslationIntoPages(formattedText);
+                        translationPageCountSpan.textContent = totalPages;
+                        
+                        // 첫 번째 번역 페이지 표시
+                        renderTranslationPage(1);
+                        
+                    } catch (error) {
+                        translationContent.textContent = `오류: ${error.message}`;
+                    }
+                } catch (pdfError) {
+                    console.error('PDF 로드 오류:', pdfError);
+                    translationContent.textContent = `PDF 로드 오류: ${pdfError.message}`;
+                } finally {
+                    loading.style.display = 'none';
+                }
+            };
+            fileReader.readAsArrayBuffer(file);
+        });
+        
+        // 이전 페이지 버튼
+        prevPageBtn.addEventListener('click', () => {
+            if (pageNum <= 1) return;
+            pageNum--;
+            renderPage(pageNum);
+        });
+
+        // 다음 페이지 버튼
+        nextPageBtn.addEventListener('click', () => {
+            if (pageNum >= pdfDoc.numPages) return;
+            pageNum++;
+            renderPage(pageNum);
+        });
+        
+        // 번역 이전 페이지 버튼
+        translationPrevPageBtn.addEventListener('click', () => {
+            if (currentTranslationPage <= 1) return;
+            renderTranslationPage(currentTranslationPage - 1);
+        });
+
+        // 번역 다음 페이지 버튼
+        translationNextPageBtn.addEventListener('click', () => {
+            if (currentTranslationPage >= translationPages.length) return;
+            renderTranslationPage(currentTranslationPage + 1);
+        });
+
+        // 구조화된 번역 결과 포맷팅
+        function formatTranslatedText(text) {
+            if (!text) return "";
+            
+            // 태그를 HTML로 변환하여 스타일 적용
+            let formattedText = text
+                // 페이지 마커
+                .replace(/\[페이지 (\d+)\/(\d+)\]/g, '<div class="page-marker">페이지 $1/$2</div>')
+                // 제목
+                .replace(/<제목>(.*?)<\/제목>/gs, '<div class="tag-title">$1</div>')
+                // 부제목
+                .replace(/<부제목>(.*?)<\/부제목>/gs, '<div class="tag-subtitle">$1</div>')
+                // 표
+                .replace(/<표 id='([^']*?)' page='([^']*?)' data-coord="([^"]*?)">(.*?)<\/표>/gs, 
+                        (match, id, page, coords, content) => {
+                            return `<div class="tag-table" data-id="${id}" data-page="${page}" data-coord="${coords}">${content}</div>`;
+                        })
+                // 이미지 (좌표 정보 이용)
+                .replace(/<이미지 id='([^']*?)' page='([^']*?)' data-coord="([^"]*?)">(.*?)<\/이미지>/gs, 
+                        (match, id, page, coords, content) => {
+                            const imgPlaceholder = `<div class="tag-image" data-id="${id}" data-page="${page}" data-coord="${coords}">
+                                <div class="missing-image">[이미지 로딩 중...]</div>
+                                <div class="caption">${content}</div>
+                            </div>`;
+                            return imgPlaceholder;
+                        })
+                // 차트 (좌표 정보 이용)
+                .replace(/<차트 id='([^']*?)' page='([^']*?)' data-coord="([^"]*?)">(.*?)<\/차트>/gs, 
+                        (match, id, page, coords, content) => {
+                            const chartPlaceholder = `<div class="tag-chart" data-id="${id}" data-page="${page}" data-coord="${coords}">
+                                <div class="missing-image">[차트 로딩 중...]</div>
+                                <div class="caption">${content}</div>
+                            </div>`;
+                            return chartPlaceholder;
+                        })
+                // 목록
+                .replace(/<목록>(.*?)<\/목록>/gs, '<div class="tag-list">$1</div>')
+                // 푸터
+                .replace(/<푸터>(.*?)<\/푸터>/gs, '<div class="tag-footer">$1</div>');
+            
+            return formattedText;
+        }
+
         // PDF-lib 및 fontkit 변수 설정
         const PDFLib = window.PDFLib;
         const fontkit = window.fontkit;
         
-        // 번역 PDF 생성 버튼 이벤트 리스너
+        // 번역된 PDF 생성 버튼 이벤트 리스너 (간소화된 버전)
         document.getElementById('create-translated-pdf').addEventListener('click', async function() {
-            const statusDiv = document.getElementById('translation-status');
+            const statusDiv = document.getElementById('test-status');
             statusDiv.style.display = 'block';
             statusDiv.textContent = '번역 PDF 생성 중...';
-            statusDiv.style.color = 'black';
             
             try {
-                // 원본 PDF가 로드되어 있는지 확인
+                // PDF가 로드되었는지 확인
                 if (!pdfDoc) {
                     throw new Error('PDF를 먼저 업로드해주세요.');
                 }
                 
+                // 번역 텍스트 가져오기
+                const translationContent = document.getElementById('translation-content');
+                const translatedText = translationContent ? translationContent.textContent : null;
+                
                 // 번역 텍스트가 있는지 확인
-                const translationText = document.getElementById('translation-content').textContent.trim();
-                if (!translationText) {
+                if (!translatedText || translatedText.trim() === '') {
                     throw new Error('번역 결과가 없습니다. 번역 처리가 완료되었는지 확인해주세요.');
                 }
                 
-                // 번역 PDF 생성 (간단한 방식으로 우선 구현)
+                // PDF-lib 관련 모듈
                 const { PDFDocument, rgb, StandardFonts } = PDFLib;
+                
+                // 원본 PDF에서 레이아웃 데이터 추출
+                console.log('레이아웃 데이터 추출 시작...');
+                const layoutData = [];
+                
+                // 각 페이지 처리
+                for (let pageNum = 1; pageNum <= pdfDoc.numPages; pageNum++) {
+                    const page = await pdfDoc.getPage(pageNum);
+                    const viewport = page.getViewport({ scale: 1.0 });
+                    const textContent = await page.getTextContent();
+                    
+                    const pageData = {
+                        pageNum: pageNum,
+                        width: viewport.width,
+                        height: viewport.height,
+                        rotation: page.rotate || 0,
+                        textItems: []
+                    };
+                    
+                    // 텍스트 아이템 추출
+                    for (const item of textContent.items) {
+                        if (!item.str || item.str.trim() === '') continue;
+                        
+                        // 변환 행렬에서 정보 추출
+                        const tx = item.transform;
+                        
+                        // 폰트 크기 계산 (변환 행렬 이용)
+                        const fontSize = Math.sqrt((tx[2] * tx[2]) + (tx[3] * tx[3]));
+                        
+                        pageData.textItems.push({
+                            text: item.str,
+                            x: tx[4], // 가로 위치
+                            y: tx[5], // 세로 위치
+                            width: item.width || 0,
+                            height: fontSize, // 높이는 폰트 크기로 근사
+                            fontName: item.fontName || 'default',
+                            fontSize: fontSize
+                        });
+                    }
+                    
+                    layoutData.push(pageData);
+                }
+                
+                console.log('추출된 레이아웃 데이터:', layoutData);
+                
+                // 번역 텍스트를 간단하게 분석하여 원본 텍스트와 매핑
+                // 실제 구현에서는 더 복잡한 매핑 로직이 필요할 수 있음
+                // 현재는 매우 단순화된 예시임
+                const translationLines = translatedText.split('\n');
+                let currentTranslationIndex = 0;
+                
+                // 새 PDF 문서 생성
                 const newPdf = await PDFDocument.create();
+                newPdf.registerFontkit(fontkit);
                 
                 // 한글 폰트 로드
+                console.log('한글 폰트 로드 중...');
                 const fontResponse = await fetch('/static/fonts/NanumGothic.ttf');
                 if (!fontResponse.ok) {
                     throw new Error(`폰트 로드 실패: ${fontResponse.status}`);
                 }
                 
                 const fontBytes = await fontResponse.arrayBuffer();
-                newPdf.registerFontkit(fontkit);
                 const koreanFont = await newPdf.embedFont(fontBytes, { subset: true });
                 
-                // 번역된 내용을 새 PDF에 추가
-                // 간단한 버전: 번역 텍스트만 새 PDF에 추가
-                const page = newPdf.addPage([595, 842]); // A4 크기
+                // 기본 폰트 (fallback용)
+                const fallbackFont = await newPdf.embedFont(StandardFonts.Helvetica);
                 
-                // 제목 추가
-                page.drawText('번역 결과', {
-                    x: 50,
-                    y: 800,
-                    size: 24,
-                    font: koreanFont,
-                    color: rgb(0, 0, 0)
-                });
+                // 텍스트 박스 동적 조정을 위한 설정
+                const textLengthRatio = 1.5;  // 한글은 영문보다 길이가 약 1.5배 증가 (예상)
                 
-                // 번역 내용 추가 - 줄바꿈 처리
-                const lines = translationText.split('\n');
-                let y = 750;
-                
-                for (const line of lines) {
-                    if (line.trim() === '') {
-                        y -= 15; // 빈 줄은 작은 간격
-                        continue;
-                    }
+                // 각 페이지 생성
+                for (const pageData of layoutData) {
+                    // 페이지 크기 설정
+                    const page = newPdf.addPage([pageData.width, pageData.height]);
                     
-                    // 너무 긴 텍스트는 잘라서 처리
-                    const words = line.split(' ');
-                    let currentLine = '';
-                    
-                    for (const word of words) {
-                        const testLine = currentLine + (currentLine ? ' ' : '') + word;
-                        const width = koreanFont.widthOfTextAtSize(testLine, 12);
+                    // 텍스트 아이템 처리
+                    for (const textItem of pageData.textItems) {
+                        // 원본 텍스트
+                        const originalText = textItem.text.trim();
                         
-                        if (width > 500) { // 여백 고려한 최대 폭
-                            // 현재 줄 그리기
-                            page.drawText(currentLine, {
-                                x: 50,
+                        // 너무 짧은 텍스트나 공백은 건너뜀
+                        if (originalText.length < 1) continue;
+                        
+                        // 번역 텍스트 찾기 (현재는 단순한 매핑)
+                        // 실제로는 더 정교한 매핑 알고리즘이 필요함
+                        let translatedItemText = '';
+                        
+                        // 번역 목록에서 유사한 텍스트 찾기
+                        // 현재는 단순히 다음 번역 텍스트를 사용
+                        if (currentTranslationIndex < translationLines.length) {
+                            translatedItemText = translationLines[currentTranslationIndex++].trim();
+                            
+                            // 빈 줄이면 다음 줄로
+                            while (translatedItemText === '' && currentTranslationIndex < translationLines.length) {
+                                translatedItemText = translationLines[currentTranslationIndex++].trim();
+                            }
+                        }
+                        
+                        // 번역 텍스트가 없으면 원본 사용
+                        if (!translatedItemText) {
+                            translatedItemText = originalText;
+                            console.log(`매핑된 번역 없음: ${originalText}`);
+                        }
+                        
+                        // 텍스트 길이에 따른 폰트 크기 조정
+                        const lengthRatio = translatedItemText.length / originalText.length;
+                        let fontSize = textItem.fontSize;
+                        
+                        // 텍스트가 길어지면 폰트 크기 조정
+                        if (lengthRatio > textLengthRatio) {
+                            fontSize = Math.max(8, fontSize * (1 / Math.sqrt(lengthRatio)));
+                        }
+                        
+                        try {
+                            // PDF 좌표계 변환 (HTML은 위에서 아래로, PDF는 아래에서 위로)
+                            const y = pageData.height - textItem.y;
+                            
+                            // 텍스트 그리기
+                            page.drawText(translatedItemText, {
+                                x: textItem.x,
                                 y: y,
-                                size: 12,
+                                size: fontSize,
                                 font: koreanFont,
                                 color: rgb(0, 0, 0)
                             });
                             
-                            // 다음 줄로 이동
-                            y -= 20;
-                            currentLine = word;
-                        } else {
-                            currentLine = testLine;
+                        } catch (error) {
+                            console.error(`텍스트 그리기 오류 (${translatedItemText}):`, error);
+                            // 오류 발생 시 기본 폰트로 그리기 시도
+                            try {
+                                page.drawText(translatedItemText, {
+                                    x: textItem.x,
+                                    y: pageData.height - textItem.y,
+                                    size: fontSize,
+                                    font: fallbackFont,
+                                    color: rgb(0, 0, 0)
+                                });
+                            } catch (fallbackError) {
+                                console.error('기본 폰트로도 그리기 실패:', fallbackError);
+                            }
                         }
-                    }
-                    
-                    // 남은 텍스트 그리기
-                    if (currentLine) {
-                        page.drawText(currentLine, {
-                            x: 50,
-                            y: y,
-                            size: 12,
-                            font: koreanFont,
-                            color: rgb(0, 0, 0)
-                        });
-                    }
-                    
-                    y -= 20; // 다음 줄로 이동
-                    
-                    // 페이지 넘침 처리
-                    if (y < 50) {
-                        y = 800;
-                        page = newPdf.addPage([595, 842]);
                     }
                 }
                 
-                // PDF 저장 및 다운로드
+                // PDF 저장
                 const pdfBytes = await newPdf.save();
+                
+                // PDF 다운로드 링크 생성
                 const blob = new Blob([pdfBytes], { type: 'application/pdf' });
                 const url = URL.createObjectURL(blob);
                 
                 // 다운로드 링크 생성
                 const a = document.createElement('a');
                 a.href = url;
-                a.download = '번역결과.pdf';
-                a.textContent = '번역 PDF 다운로드';
+                a.download = '번역된_문서.pdf';
+                a.textContent = '번역된 PDF 다운로드';
                 a.style.display = 'inline-block';
                 a.style.marginTop = '10px';
-                a.style.padding = '8px 15px';
-                a.style.backgroundColor = '#28a745';
+                a.style.padding = '5px 10px';
+                a.style.backgroundColor = '#007bff';
                 a.style.color = 'white';
                 a.style.borderRadius = '4px';
                 a.style.textDecoration = 'none';
@@ -761,287 +952,11 @@
                 
                 statusDiv.innerHTML = '번역 PDF 생성 완료! ';
                 statusDiv.appendChild(a);
-                statusDiv.style.color = 'green';
                 
             } catch (error) {
-                console.error('PDF 생성 오류:', error);
+                console.error('번역 PDF 생성 오류:', error);
                 statusDiv.textContent = `오류: ${error.message}`;
-                statusDiv.style.color = 'red';
-            }
-        });
-        
-        // 간단한 PDF 생성 테스트
-        document.getElementById('test-simple-pdf').addEventListener('click', async function() {
-            const statusDiv = document.getElementById('test-status');
-            statusDiv.style.display = 'block';
-            statusDiv.textContent = '간단한 PDF 생성 중...';
-            
-            try {
-                const { PDFDocument, rgb, StandardFonts } = PDFLib;
-                
-                // PDF 문서 생성
-                const pdfDoc = await PDFDocument.create();
-                
-                // 헬베티카 폰트 임베드
-                const helveticaFont = await pdfDoc.embedFont(StandardFonts.Helvetica);
-                
-                // 페이지 추가
-                const page = pdfDoc.addPage([595, 842]); // A4 크기
-                
-                // 텍스트 추가
-                page.drawText('Hello, World!', {
-                    x: 50,
-                    y: 800,
-                    size: 30,
-                    font: helveticaFont,
-                    color: rgb(0, 0.53, 0.71)
-                });
-                
-                page.drawText('This is a simple PDF created with PDF-lib.', {
-                    x: 50,
-                    y: 750,
-                    size: 15,
-                    font: helveticaFont,
-                    color: rgb(0, 0, 0)
-                });
-                
-                // PDF 저장
-                const pdfBytes = await pdfDoc.save();
-                
-                // 바이트를 Blob으로 변환
-                const blob = new Blob([pdfBytes], { type: 'application/pdf' });
-                const url = URL.createObjectURL(blob);
-                
-                // 다운로드 링크 생성
-                const a = document.createElement('a');
-                a.href = url;
-                a.download = 'simple.pdf';
-                a.textContent = '간단한 PDF 다운로드';
-                a.style.display = 'inline-block';
-                a.style.marginTop = '10px';
-                a.style.padding = '5px 10px';
-                a.style.backgroundColor = '#007bff';
-                a.style.color = 'white';
-                a.style.borderRadius = '4px';
-                a.style.textDecoration = 'none';
-                
-                // 새 탭에서 PDF 열기
-                window.open(url, '_blank');
-                
-                statusDiv.innerHTML = '간단한 PDF 생성 완료! ';
-                statusDiv.appendChild(a);
-                
-            } catch (error) {
-                console.error('PDF 생성 오류:', error);
-                statusDiv.textContent = `오류: ${error.message}`;
-            }
-        });
-        
-        // 한글 폰트 PDF 테스트
-        document.getElementById('test-korean-pdf').addEventListener('click', async function() {
-            const statusDiv = document.getElementById('test-status');
-            statusDiv.style.display = 'block';
-            statusDiv.textContent = '한글 폰트 PDF 생성 중...';
-            
-            try {
-                const { PDFDocument, rgb, StandardFonts } = PDFLib;
-                
-                // PDF 문서 생성
-                const pdfDoc = await PDFDocument.create();
-                pdfDoc.registerFontkit(fontkit);
-                
-                // 기본 폰트 임베드
-                const helveticaFont = await pdfDoc.embedFont(StandardFonts.Helvetica);
-                
-                // 한글 폰트 로드
-                const fontResponse = await fetch('/static/fonts/NanumGothic.ttf');
-                if (!fontResponse.ok) {
-                    throw new Error(`폰트 로드 실패: ${fontResponse.status}`);
-                }
-                
-                const fontBytes = await fontResponse.arrayBuffer();
-                const koreanFont = await pdfDoc.embedFont(fontBytes, { subset: true });
-                
-                // 페이지 추가
-                const page = pdfDoc.addPage([595, 842]); // A4 크기
-                
-                // 영어 텍스트 추가
-                page.drawText('Hello, World!', {
-                    x: 50,
-                    y: 800,
-                    size: 30,
-                    font: helveticaFont,
-                    color: rgb(0, 0.53, 0.71)
-                });
-                
-                // 한글 텍스트 추가
-                page.drawText('안녕하세요, 세계!', {
-                    x: 50,
-                    y: 750,
-                    size: 30,
-                    font: koreanFont,
-                    color: rgb(0.95, 0.1, 0.1)
-                });
-                
-                page.drawText('이것은 한글 폰트로 생성된 PDF 입니다.', {
-                    x: 50,
-                    y: 700,
-                    size: 15,
-                    font: koreanFont,
-                    color: rgb(0, 0, 0)
-                });
-                
-                // PDF 저장
-                const pdfBytes = await pdfDoc.save();
-                
-                // 바이트를 Blob으로 변환
-                const blob = new Blob([pdfBytes], { type: 'application/pdf' });
-                const url = URL.createObjectURL(blob);
-                
-                // 다운로드 링크 생성
-                const a = document.createElement('a');
-                a.href = url;
-                a.download = 'korean.pdf';
-                a.textContent = '한글 PDF 다운로드';
-                a.style.display = 'inline-block';
-                a.style.marginTop = '10px';
-                a.style.padding = '5px 10px';
-                a.style.backgroundColor = '#007bff';
-                a.style.color = 'white';
-                a.style.borderRadius = '4px';
-                a.style.textDecoration = 'none';
-                
-                // 새 탭에서 PDF 열기
-                window.open(url, '_blank');
-                
-                statusDiv.innerHTML = '한글 폰트 PDF 생성 완료! ';
-                statusDiv.appendChild(a);
-                
-            } catch (error) {
-                console.error('PDF 생성 오류:', error);
-                statusDiv.textContent = `오류: ${error.message}`;
-            }
-        });
-        
-        // 레이아웃 기반 PDF 생성
-        document.getElementById('test-pdf-with-layout').addEventListener('click', async function() {
-            const statusDiv = document.getElementById('test-status');
-            statusDiv.style.display = 'block';
-            statusDiv.textContent = '레이아웃 기반 PDF 생성 중...';
-            
-            try {
-                if (!pdfDoc) {
-                    throw new Error('PDF를 먼저 업로드해주세요.');
-                }
-                
-                console.log('레이아웃 데이터 추출 시작');
-                
-                // 레이아웃 데이터 추출
-                const layoutData = [];
-                
-                // 각 페이지 처리
-                for (let pageNum = 1; pageNum <= Math.min(pdfDoc.numPages, 2); pageNum++) { // 최대 2페이지로 제한
-                    const page = await pdfDoc.getPage(pageNum);
-                    const viewport = page.getViewport({ scale: 1.0 });
-                    const textContent = await page.getTextContent();
-                    
-                    const pageData = {
-                        pageNum: pageNum,
-                        width: viewport.width,
-                        height: viewport.height,
-                        textItems: []
-                    };
-                    
-                    // 이 부분에서 문자 그룹화 로직을 단순화했습니다
-                    for (const item of textContent.items) {
-                        if (item.str.trim() === '') continue;
-                        
-                        pageData.textItems.push({
-                            text: item.str,
-                            x: item.transform[4],
-                            y: item.transform[5],
-                            fontSize: Math.sqrt((item.transform[2] * item.transform[2]) + (item.transform[3] * item.transform[3])),
-                            fontFamily: item.fontName || 'Helvetica'
-                        });
-                    }
-                    
-                    layoutData.push(pageData);
-                }
-                
-                console.log('추출된 레이아웃 데이터:', layoutData);
-                
-                // PDF 생성 시작
-                const { PDFDocument, rgb, StandardFonts } = PDFLib;
-                const newPdf = await PDFDocument.create();
-                newPdf.registerFontkit(fontkit);
-                
-                // 기본 폰트 임베드
-                const helveticaFont = await newPdf.embedFont(StandardFonts.Helvetica);
-                
-                // 한글 폰트 로드
-                const fontResponse = await fetch('/static/fonts/NanumGothic.ttf');
-                if (!fontResponse.ok) {
-                    throw new Error(`폰트 로드 실패: ${fontResponse.status}`);
-                }
-                
-                const fontBytes = await fontResponse.arrayBuffer();
-                const koreanFont = await newPdf.embedFont(fontBytes, { subset: true });
-                
-                // 각 페이지 처리
-                for (const pageData of layoutData) {
-                    // 같은 크기의 새 페이지 추가
-                    const page = newPdf.addPage([pageData.width, pageData.height]);
-                    
-                    // 각 텍스트 항목 그리기
-                    for (const item of pageData.textItems) {
-                        try {
-                            // 한글 텍스트 여부 확인 (간단한 방식)
-                            const hasKorean = /[ㄱ-ㅎ|ㅏ-ㅣ|가-힣]/.test(item.text);
-                            const font = hasKorean ? koreanFont : helveticaFont;
-                            
-                            // 텍스트 그리기
-                            page.drawText(item.text, {
-                                x: item.x,
-                                y: item.y,
-                                size: item.fontSize,
-                                font: font,
-                                color: rgb(0, 0, 0)
-                            });
-                        } catch (err) {
-                            console.error('텍스트 그리기 오류:', err, item);
-                        }
-                    }
-                }
-                
-                // PDF 저장
-                const pdfBytes = await newPdf.save();
-                
-                // 바이트를 Blob으로 변환
-                const blob = new Blob([pdfBytes], { type: 'application/pdf' });
-                const url = URL.createObjectURL(blob);
-                
-                // 다운로드 링크 생성
-                const a = document.createElement('a');
-                a.href = url;
-                a.download = 'layout_based.pdf';
-                a.textContent = '레이아웃 PDF 다운로드';
-                a.style.display = 'inline-block';
-                a.style.marginTop = '10px';
-                a.style.padding = '5px 10px';
-                a.style.backgroundColor = '#007bff';
-                a.style.color = 'white';
-                a.style.borderRadius = '4px';
-                a.style.textDecoration = 'none';
-                
-                // 새 탭에서 PDF 열기
-                window.open(url, '_blank');
-                
-                statusDiv.innerHTML = '레이아웃 기반 PDF 생성 완료! ';
-                statusDiv.appendChild(a);
-                
-            } catch (error) {
-                console.error('PDF 생성 오류:', error);
-                statusDiv.textContent = `오류: ${error.message}`;
+                statusDiv.className = 'error';
             }
         });
     </script>
