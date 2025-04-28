@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify, send_from_directory
+from flask import Flask, request, jsonify, send_from_directory, Response
 import os
 import requests
 import tempfile
@@ -14,6 +14,19 @@ import PyPDF2
 import re
 from concurrent.futures import ThreadPoolExecutor
 from logging.handlers import RotatingFileHandler
+# PDF 생성을 위한 추가 라이브러리
+from reportlab.pdfgen import canvas
+from reportlab.lib.pagesizes import A4
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image, Table, TableStyle
+from reportlab.lib import colors
+from io import BytesIO
+from bs4 import BeautifulSoup
+import base64
+import re
+from urllib.parse import quote  # URL 인코딩을 위한 라이브러리 추가
 
 # .env 파일에서 환경 변수 로드
 load_dotenv()
@@ -71,47 +84,313 @@ def index():
 def translate_pdf():
     if 'file' not in request.files:
         return jsonify({'error': '파일이 제공되지 않았습니다.'}), 400
-    
+
     file = request.files['file']
-    
+
     if file.filename == '':
         return jsonify({'error': '파일이 선택되지 않았습니다.'}), 400
-    
+
     if not file.filename.lower().endswith('.pdf'):
         return jsonify({'error': 'PDF 파일만 지원합니다.'}), 400
-    
+
     try:
         # 임시 파일로 저장
         temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.pdf')
         file.save(temp_file.name)
         temp_file.close()
-        
-        # 처리 방식 선택 (OCR vs PyPDF2)
-        use_ocr = True  # 레이아웃 보존을 위해 OCR 사용
-        
-        if use_ocr:
-            # Upstage Document OCR API로 PDF 내용 추출 (레이아웃 보존)
-            extracted_text, document_structure = extract_text_with_ocr(temp_file.name)
-        else:
-            # PyPDF2로 PDF 내용 추출 (원본 레이아웃 유지 시도)
-            extracted_text = extract_text_from_pdf(temp_file.name)
-            document_structure = None
-        
-        # 추출된 텍스트가 없거나 오류 메시지인 경우
-        if not extracted_text or len(extracted_text.strip()) == 0 or "오류가 발생했습니다" in extracted_text:
-            translated_text = "PDF에서 텍스트를 추출할 수 없습니다."
-        else:
-            # 텍스트가 너무 길면 청크로 나누어 병렬 번역
-            translated_text = translate_with_structure(extracted_text, document_structure)
-        
+
+        # OCR 강제 사용
+        extracted_text, document_structure = extract_text_with_ocr(temp_file.name)
+
         # 임시 파일 삭제
         os.unlink(temp_file.name)
-        
+
+        if not extracted_text or len(extracted_text.strip()) == 0:
+            return jsonify({'error': 'OCR을 통해 텍스트를 추출할 수 없습니다.'}), 500
+
+        # 번역까지 이어지는 경우:
+        translated_text = translate_with_structure(extracted_text, document_structure)
+
         return jsonify({'translation': translated_text})
-    
+
     except Exception as e:
         logging.error(f"Error processing PDF: {str(e)}")
         return jsonify({'error': f'PDF 처리 중 오류가 발생했습니다: {str(e)}'}), 500
+
+@app.route('/generate-pdf', methods=['POST'])
+def generate_pdf():
+    try:
+        data = request.json
+        
+        # HTML 콘텐츠 확인
+        html_content = data.get('htmlContent')
+        original_file_name = data.get('originalFileName', '번역문서')
+        
+        if not html_content or len(html_content.strip()) == 0:
+            return jsonify({'error': 'HTML 콘텐츠가 없습니다.'}), 400
+        
+        logger.info(f"PDF 생성 요청 받음: HTML 길이 {len(html_content)} 문자")
+        
+        # HTML 파싱 - 완전한 HTML 문서로 만들기
+        complete_html = f"<html><body>{html_content}</body></html>"
+        soup = BeautifulSoup(complete_html, 'html.parser')
+        
+        logger.info("HTML 파싱 완료")
+        
+        # PDF 생성
+        buffer = BytesIO()
+        
+        try:
+            # 나눔고딕 폰트 등록
+            font_path = os.path.join('static', 'fonts', 'NanumGothic.ttf')
+            bold_font_path = os.path.join('static', 'fonts', 'NanumGothicBold.ttf')
+            
+            if not os.path.exists(font_path):
+                logger.error(f"폰트 파일을 찾을 수 없음: {font_path}")
+                return jsonify({'error': '폰트 파일을 찾을 수 없습니다.'}), 500
+                
+            # ReportLab에 폰트 등록
+            pdfmetrics.registerFont(TTFont('NanumGothic', font_path))
+            pdfmetrics.registerFont(TTFont('NanumGothicBold', bold_font_path))
+            
+            logger.info("폰트 등록 완료")
+        except Exception as font_error:
+            logger.error(f"폰트 등록 오류: {str(font_error)}")
+            return jsonify({'error': f'폰트 등록 오류: {str(font_error)}'}), 500
+        
+        # PDF 문서 생성
+        doc = SimpleDocTemplate(
+            buffer,
+            pagesize=A4,
+            rightMargin=72,
+            leftMargin=72,
+            topMargin=72,
+            bottomMargin=72
+        )
+        
+        # 스타일 설정
+        styles = getSampleStyleSheet()
+        styles.add(ParagraphStyle(
+            name='Normal_KO',
+            fontName='NanumGothic',
+            fontSize=10,
+            leading=12,
+            spaceBefore=5,
+            spaceAfter=5
+        ))
+        styles.add(ParagraphStyle(
+            name='Title_KO',
+            fontName='NanumGothicBold',
+            fontSize=16,
+            leading=20,
+            alignment=1,  # 중앙 정렬
+            spaceBefore=10,
+            spaceAfter=10
+        ))
+        styles.add(ParagraphStyle(
+            name='Subtitle_KO',
+            fontName='NanumGothicBold',
+            fontSize=14,
+            leading=16,
+            spaceBefore=8,
+            spaceAfter=8
+        ))
+        
+        logger.info("스타일 설정 완료")
+        
+        # PDF에 추가할 요소 리스트
+        elements = []
+        
+        # 제목 추가
+        title_elem = soup.find(class_='document-title')
+        if title_elem:
+            try:
+                elements.append(Paragraph(title_elem.text, styles['Title_KO']))
+                elements.append(Spacer(1, 12))
+                logger.info("제목 추가 완료")
+            except Exception as title_error:
+                logger.error(f"제목 추가 오류: {str(title_error)}")
+        
+        # 현재 페이지 번호를 추적
+        current_page = None
+        
+        # 본문 내용 추가 - 모든 HTML 요소를 처리
+        all_elements = soup.find_all(recursive=True)
+        logger.info(f"총 {len(all_elements)}개 HTML 요소 발견")
+        
+        for element in all_elements:
+            try:
+                # 페이지 마커 처리
+                if element.get('class') and 'page-marker' in element.get('class'):
+                    if current_page != element.text:
+                        current_page = element.text
+                        elements.append(Paragraph(current_page, styles['Subtitle_KO']))
+                        elements.append(Spacer(1, 12))
+                
+                # 제목 처리
+                elif element.get('class') and 'tag-title' in element.get('class'):
+                    elements.append(Paragraph(element.text, styles['Title_KO']))
+                    elements.append(Spacer(1, 6))
+                
+                # 부제목 처리
+                elif element.get('class') and 'tag-subtitle' in element.get('class'):
+                    elements.append(Paragraph(element.text, styles['Subtitle_KO']))
+                    elements.append(Spacer(1, 6))
+                
+                # 이미지 처리
+                elif element.get('class') and ('tag-image' in element.get('class') or 'tag-chart' in element.get('class')):
+                    # 이미지 찾기
+                    img_tag = element.find('img')
+                    if img_tag and 'src' in img_tag.attrs:
+                        src = img_tag['src']
+                        try:
+                            # 이미지 데이터 추출
+                            if src.startswith('data:image'):
+                                try:
+                                    # Base64 이미지 처리
+                                    if ';base64,' in src:
+                                        img_type, base64_data = src.split(';base64,', 1)
+                                        img_data = base64.b64decode(base64_data)
+                                        img_stream = BytesIO(img_data)
+                                        
+                                        # 이미지 크기 조정 (A4 너비에 맞게)
+                                        try:
+                                            image = Image(img_stream, width=400, height=300, kind='proportional')
+                                            elements.append(image)
+                                            
+                                            # 캡션 추가
+                                            caption = element.find(class_='caption')
+                                            if caption:
+                                                elements.append(Paragraph(caption.text, styles['Normal_KO']))
+                                            
+                                            elements.append(Spacer(1, 12))
+                                            logger.info(f"이미지 추가 완료: {img_type}")
+                                        except Exception as img_render_error:
+                                            logger.error(f"이미지 렌더링 오류: {str(img_render_error)}")
+                                            elements.append(Paragraph(f"[이미지를 표시할 수 없습니다]", styles['Normal_KO']))
+                                    else:
+                                        logger.error("이미지 형식 오류: base64 데이터를 찾을 수 없음")
+                                        elements.append(Paragraph(f"[이미지 형식 오류]", styles['Normal_KO']))
+                                except Exception as base64_error:
+                                    logger.error(f"Base64 디코딩 오류: {str(base64_error)}")
+                                    elements.append(Paragraph(f"[이미지 디코딩 오류]", styles['Normal_KO']))
+                            else:
+                                logger.warning(f"지원되지 않는 이미지 형식: {src[:30]}...")
+                                elements.append(Paragraph(f"[지원되지 않는 이미지 형식]", styles['Normal_KO']))
+                        except Exception as img_error:
+                            logger.error(f"이미지 처리 오류: {str(img_error)}")
+                            elements.append(Paragraph(f"[이미지 처리 실패]", styles['Normal_KO']))
+                    else:
+                        # 이미지 태그가 없는 경우 대체 텍스트 사용
+                        alt_text = "이미지" if 'tag-image' in element.get('class') else "차트"
+                        elements.append(Paragraph(f"[{alt_text}]", styles['Normal_KO']))
+                        if element.text and element.text.strip():
+                            elements.append(Paragraph(element.text.strip(), styles['Normal_KO']))
+                        logger.info(f"이미지 태그 없음, 대체 텍스트 사용: {alt_text}")
+                
+                # 테이블 처리
+                elif element.get('class') and 'tag-table' in element.get('class'):
+                    table_html = element.find('table')
+                    if table_html:
+                        try:
+                            # HTML 테이블을 ReportLab 테이블로 변환
+                            data = []
+                            
+                            # 헤더 행 처리
+                            headers = []
+                            for th in table_html.find_all('th'):
+                                headers.append(Paragraph(th.text, styles['Normal_KO']))
+                            if headers:
+                                data.append(headers)
+                            
+                            # 데이터 행 처리
+                            for tr in table_html.find_all('tr'):
+                                row = []
+                                for td in tr.find_all('td'):
+                                    row.append(Paragraph(td.text, styles['Normal_KO']))
+                                if row:  # 헤더만 있는 경우 빈 행은 건너뜀
+                                    data.append(row)
+                            
+                            if data:
+                                # 테이블 생성
+                                table = Table(data, repeatRows=1)
+                                
+                                # 테이블 스타일 설정
+                                table.setStyle(TableStyle([
+                                    ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
+                                    ('TEXTCOLOR', (0, 0), (-1, 0), colors.black),
+                                    ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+                                    ('FONTNAME', (0, 0), (-1, 0), 'NanumGothicBold'),
+                                    ('FONTSIZE', (0, 0), (-1, 0), 10),
+                                    ('BOTTOMPADDING', (0, 0), (-1, 0), 8),
+                                    ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
+                                    ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+                                ]))
+                                
+                                elements.append(table)
+                                elements.append(Spacer(1, 12))
+                                logger.info(f"테이블 추가 완료: {len(data)}행 x {len(data[0]) if data else 0}열")
+                        except Exception as table_error:
+                            logger.error(f"테이블 처리 오류: {str(table_error)}")
+                            elements.append(Paragraph(f"[테이블 처리 실패]", styles['Normal_KO']))
+                
+                # 일반 텍스트 처리
+                elif element.name and element.name.lower() in ['p', 'div', 'span'] and element.text.strip():
+                    # 이미 처리된 종류의 요소 제외
+                    skip_classes = ['page-marker', 'tag-title', 'tag-subtitle', 'tag-image', 'tag-chart', 'caption', 'document-title']
+                    if not element.get('class') or not any(c in element.get('class') for c in skip_classes):
+                        # 목차 항목(toc-entry) 제외
+                        parent_classes = []
+                        if element.parent and element.parent.get('class'):
+                            parent_classes = element.parent.get('class')
+                            
+                        if 'toc-entry' not in parent_classes:
+                            clean_text = element.text.strip()
+                            if clean_text:
+                                elements.append(Paragraph(clean_text, styles['Normal_KO']))
+                                elements.append(Spacer(1, 6))
+            except Exception as elem_error:
+                logger.error(f"요소 처리 오류: {str(elem_error)}")
+                continue
+        
+        logger.info(f"총 {len(elements)}개 요소가 PDF에 추가됨")
+        
+        if not elements:
+            logger.warning("PDF에 추가될 요소가 없습니다.")
+            elements.append(Paragraph("내용이 없습니다.", styles['Normal_KO']))
+        
+        # PDF 생성
+        try:
+            doc.build(elements)
+            logger.info("PDF 빌드 완료")
+        except Exception as build_error:
+            logger.error(f"PDF 빌드 오류: {str(build_error)}")
+            return jsonify({'error': f'PDF 생성 중 오류: {str(build_error)}'}), 500
+        
+        # BytesIO 버퍼를 0 위치로 되돌림
+        buffer.seek(0)
+        
+        # PDF 응답 반환
+        logger.info("PDF 생성 성공")
+        
+        # 한글 파일명 인코딩 처리
+        quoted_filename = quote(f"{original_file_name}_번역.pdf")
+        
+        # Response 객체를 직접 생성하여 헤더 설정
+        return Response(
+            buffer.getvalue(),
+            status=200,
+            headers={
+                'Content-Type': 'application/pdf',
+                'Content-Disposition': f"attachment; filename*=UTF-8''{quoted_filename}"
+            }
+        )
+    
+    except Exception as e:
+        logger.error(f"PDF 생성 중 오류: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return jsonify({'error': f'PDF 생성 중 오류가 발생했습니다: {str(e)}'}), 500
 
 def extract_text_with_ocr(file_path):
     """Upstage Document OCR API를 사용하여 PDF 분석 (레이아웃 보존)"""
@@ -209,8 +488,6 @@ def generate_structured_text_from_elements(elements, total_pages):
     if not elements:
         return ""
     
-    logger.info(f"OCR 요소를 구조화된 텍스트로 변환 시작: {len(elements)} 요소")
-    
     # 페이지별로 요소 그룹화
     page_elements = {}
     for elem in elements:
@@ -232,43 +509,11 @@ def generate_structured_text_from_elements(elements, total_pages):
             if e.get('coordinates') and len(e.get('coordinates', [])) > 0 else 0
         )
         
-        logger.debug(f"페이지 {page_num}: {len(sorted_elements)} 요소 처리")
-        
         # 각 요소를 처리
         for elem in sorted_elements:
             category = elem.get('category', '')
             elem_id = elem.get('id', '')
             content = ""
-            
-            # 좌표 정보 추출 (모든 요소에 공통 적용)
-            coords_attr = ""
-            bbox = None
-            
-            if 'coordinates' in elem and len(elem['coordinates']) >= 2:
-                try:
-                    # 좌표 정보가 polygon 형태인 경우 (여러 점)
-                    if len(elem['coordinates']) >= 2:
-                        # 모든 x, y 좌표 추출
-                        x_coords = [point['x'] for point in elem['coordinates']]
-                        y_coords = [point['y'] for point in elem['coordinates']]
-                        
-                        # 바운딩 박스 계산
-                        x0 = min(x_coords)
-                        y0 = min(y_coords)
-                        x1 = max(x_coords)
-                        y1 = max(y_coords)
-                        
-                        # 정밀도를 위해 소수점 4자리까지 유지하여 bbox 정보 저장
-                        bbox = [round(x0, 4), round(y0, 4), round(x1, 4), round(y1, 4)]
-                        
-                        # 데이터 속성으로 좌표 추가 (픽셀 단위로 1000배 확대)
-                        coords_attr = f"data-bbox=\"{bbox[0]},{bbox[1]},{bbox[2]},{bbox[3]}\" " + \
-                                     f"data-coord=\"x0:{int(bbox[0]*1000)},y0:{int(bbox[1]*1000)},x1:{int(bbox[2]*1000)},y1:{int(bbox[3]*1000)}\""
-                        
-                        logger.debug(f"요소 ID {elem_id}, 카테고리 {category}, 좌표: {bbox}")
-                except Exception as e:
-                    logger.warning(f"좌표 처리 중 오류: 요소 ID {elem_id}, 오류: {str(e)}")
-                    coords_attr = ""
             
             # 콘텐츠 추출
             if 'content' in elem:
@@ -283,24 +528,37 @@ def generate_structured_text_from_elements(elements, total_pages):
             
             # 요소 유형별 처리 (이미지/표 특별 처리)
             if category == 'heading1' or category.startswith('header'):
-                result_text += f"<제목 id='{elem_id}' page='{page_num}' {coords_attr}>{content}</제목>\n\n"
+                result_text += f"<제목>{content}</제목>\n\n"
             elif category == 'heading2':
-                result_text += f"<부제목 id='{elem_id}' page='{page_num}' {coords_attr}>{content}</부제목>\n\n"
+                result_text += f"<부제목>{content}</부제목>\n\n"
             elif category == 'paragraph':
-                result_text += f"<문단 id='{elem_id}' page='{page_num}' {coords_attr}>{content}</문단>\n\n"
+                result_text += f"{content}\n\n"
             elif category == 'list':
-                result_text += f"<목록 id='{elem_id}' page='{page_num}' {coords_attr}>\n{content}\n</목록>\n\n"
+                result_text += f"<목록>\n{content}\n</목록>\n\n"
             elif category == 'table':
                 # 테이블 처리 개선 - 테이블 내용과 페이지 번호 및 좌표 추가
                 table_content = ""
                 if 'table' in elem:
                     table_content = format_table(elem.get('table', []))
                 
-                result_text += f"<표 id='{elem_id}' page='{page_num}' {coords_attr}>\n{table_content}\n</표>\n\n"
+                # 좌표 정보 추가 (이미지 추출 용도)
+                coords = ""
+                if 'coordinates' in elem and len(elem['coordinates']) >= 2:
+                    top_left = elem['coordinates'][0]
+                    bottom_right = elem['coordinates'][2] if len(elem['coordinates']) > 2 else elem['coordinates'][1]
+                    coords = f"data-coord=\"top-left:({int(top_left['x']*1000)},{int(top_left['y']*1000)}); bottom-right:({int(bottom_right['x']*1000)},{int(bottom_right['y']*1000)})\""
+                
+                result_text += f"<표 id='{elem_id}' page='{page_num}' {coords}>\n{table_content}\n</표>\n\n"
             elif category == 'image' or category == 'figure':
                 # 이미지 정보 추가 (좌표 정보 포함)
                 image_desc = content or '이미지'
-                result_text += f"<이미지 id='{elem_id}' page='{page_num}' {coords_attr}>{image_desc}</이미지>\n\n"
+                coords = ""
+                if 'coordinates' in elem and len(elem['coordinates']) >= 2:
+                    top_left = elem['coordinates'][0]
+                    bottom_right = elem['coordinates'][2] if len(elem['coordinates']) > 2 else elem['coordinates'][1]
+                    coords = f"data-coord=\"top-left:({int(top_left['x']*1000)},{int(top_left['y']*1000)}); bottom-right:({int(bottom_right['x']*1000)},{int(bottom_right['y']*1000)})\""
+                
+                result_text += f"<이미지 id='{elem_id}' page='{page_num}' {coords}>{image_desc}</이미지>\n\n"
             elif category == 'chart':
                 # 차트 정보 추가 (좌표 정보 포함)
                 chart_desc = content or '차트'
@@ -308,14 +566,19 @@ def generate_structured_text_from_elements(elements, total_pages):
                 if 'table' in elem:
                     chart_data = format_table(elem.get('table', []))
                 
-                result_text += f"<차트 id='{elem_id}' page='{page_num}' {coords_attr}>{chart_desc}\n{chart_data}</차트>\n\n"
+                coords = ""
+                if 'coordinates' in elem and len(elem['coordinates']) >= 2:
+                    top_left = elem['coordinates'][0]
+                    bottom_right = elem['coordinates'][2] if len(elem['coordinates']) > 2 else elem['coordinates'][1]
+                    coords = f"data-coord=\"top-left:({int(top_left['x']*1000)},{int(top_left['y']*1000)}); bottom-right:({int(bottom_right['x']*1000)},{int(bottom_right['y']*1000)})\""
+                
+                result_text += f"<차트 id='{elem_id}' page='{page_num}' {coords}>{chart_desc}\n{chart_data}</차트>\n\n"
             elif category == 'footer':
-                result_text += f"<푸터 id='{elem_id}' page='{page_num}' {coords_attr}>{content}</푸터>\n\n"
+                result_text += f"<푸터>{content}</푸터>\n\n"
             else:
-                # 기타 요소 - 범용 텍스트 블록으로 처리
-                result_text += f"<텍스트블록 id='{elem_id}' page='{page_num}' category='{category}' {coords_attr}>{content}</텍스트블록>\n\n"
+                # 기타 요소
+                result_text += f"{content}\n\n"
     
-    logger.info(f"OCR 요소 구조화 완료: 변환된 텍스트 길이 {len(result_text)} 문자")
     return result_text
 
 def extract_document_structure(ocr_data):
@@ -633,4 +896,4 @@ def translate_text(text):
         return f"번역 중 오류가 발생했습니다: {str(e)}"
 
 if __name__ == '__main__':
-    app.run(debug=True) 
+    app.run(host='0.0.0.0', port=5001, debug=True) 
